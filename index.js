@@ -115,7 +115,7 @@ async function syncHolderIfLeftVoice(guild, role) {
   }
 }
 
-client.once("ready", async () => {
+client.once("clientready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log("Listening for voice joins/leaves...");
 
@@ -171,7 +171,7 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
     // 4) Announce
     const announceChannel = await getAnnouncementChannel(guild);
     if (announceChannel) {
-      await announceChannel.send(`**${winner.displayName}** has been detected as Gay!`);
+      await announceChannel.send(`🚨 ALERT 🚨 **${winner.displayName}** has been detected as Gay! 🌈`);
     } else {
       console.warn(`[${guild.name}] Can't announce (no #general or no perms).`);
     }
