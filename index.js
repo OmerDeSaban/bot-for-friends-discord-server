@@ -115,7 +115,7 @@ async function syncHolderIfLeftVoice(guild, role) {
   }
 }
 
-client.once("clientready", async () => {
+client.once("clientReady", async () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log("Listening for voice joins/leaves...");
 
