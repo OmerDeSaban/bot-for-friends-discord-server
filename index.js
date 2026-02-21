@@ -23,6 +23,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const APP_ID = process.env.DISCORD_APP_ID;
 const OWNER_ID = process.env.OWNER_ID; // your Discord user id
 const TOM_ID = process.env.TOM_ID || null; // optional
+const IDO_ID = process.env.IDO_ID || null;
 const GUILD_ID = process.env.DISCORD_GUILD_ID || null; // recommended for instant command updates
 const TIMEZONE = process.env.TIMEZONE || "Asia/Jerusalem";
 
@@ -33,9 +34,16 @@ if (!OWNER_ID) throw new Error("Missing OWNER_ID env var.");
 const ROLE_NAME = "Gay";
 const ANNOUNCE_CHANNEL_NAME = "general";
 
-// Tom rig: when Tom is present + someone else was picked, final decision is:
-// Tom: 20%, Other: 80%
-const TOM_PROB = 0.2;
+// Tom/Ido head-to-head prob (same rig as Tom had)
+const RIG_WIN_PROB = 0.2;
+
+// When both present + initial pick isn't Tom or Ido
+// Weighted 3-way: Ido 10%, Tom 15%, random 75%
+const BOTH_PRESENT_WEIGHTS = {
+  ido: 0.10,
+  tom: 0.15,
+  rnd: 0.75,
+};
 
 /* =========================
    HEALTH SERVER (Render)
@@ -134,9 +142,16 @@ const CHOSEN_MESSAGES = [
   (name) => `Hey, **${name}**, WHY. ARE. YOU. GAY?! 🌈`,
   (name) => `Mistah **${name}**, Can I call you MISTAH? 🌈`,
   (name) => `You are Gay activist, **${name}**. You are Gay. 🌈`,
-  (name) => `📡 The Gaydar is buzzing… it’s pointing at **${name}**!`,
-  (name) => `🧪 After careful scientific analysis… **${name}** is Gay.`,
+  (name) => `📡 The Gaydar is buzzing… it’s pointing at **${name}**! 🌈`,
+  (name) => `🧪 After careful scientific analysis… **${name}** is Gay. 🌈`,
 ];
+
+const IDO_SPECIAL_MESSAGES = [
+  () => 'עידו הוא הומו, הוא אוהב גברים\nעידו הוא הומו, לא סובל נשים\nעידו הוא הומו, איך הוא לא הבין\nעידו הוא הומו, שהוא רוצה זרגים?!',
+  () => 'יש לי חבר, קוראים לו עידו, אבל הוא לא רגיל כיייייייייי\nעידו הוא הומו!!!',
+];
+
+const IDO_CHOSEN_MESSAGES = [...CHOSEN_MESSAGES, ...IDO_SPECIAL_MESSAGES];
 
 // When the current Gay leaves AND old channel still has humans
 const LEAVE_REROLL_MESSAGES = [
@@ -157,6 +172,74 @@ const LEAVE_REROLL_MESSAGES = [
    ========================= */
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function weightedPick(options) {
+  // options: [{ key, weight, value }]
+  const total = options.reduce((s, o) => s + o.weight, 0);
+  let r = Math.random() * total;
+  for (const o of options) {
+    r -= o.weight;
+    if (r <= 0) return o.value;
+  }
+  return options[options.length - 1].value;
+}
+
+/**
+ * Apply rigging rules for Tom + Ido.
+ *
+ * Rules you asked for:
+ * 1) If neither Tom nor Ido present => no rig.
+ * 2) If only one present => head-to-head rig between that person and the initial winner (if initial winner isn't them).
+ * 3) If both present:
+ *    - If initial is Tom => keep.
+ *    - If initial is Ido => do head-to-head rig (Ido vs Ido? effectively keep, but we keep logic consistent).
+ *    - Else => weighted choice among {Tom, Ido, initial} with 15/10/75.
+ */
+function applyTomIdoRig(initialWinner, voiceChannel) {
+  const humans = voiceChannel.members.filter((m) => !m.user.bot);
+
+  const tom = TOM_ID ? humans.get(TOM_ID) : null;
+  const ido = IDO_ID ? humans.get(IDO_ID) : null;
+
+  const tomPresent = !!tom;
+  const idoPresent = !!ido;
+
+  // (1) Neither present
+  if (!tomPresent && !idoPresent) return initialWinner;
+
+  // Helper: head-to-head rig for whichever favored is present
+  const rigHeadToHead = (favoredMember, otherMember) => {
+    if (!favoredMember) return otherMember;
+    if (otherMember.id === favoredMember.id) return favoredMember;
+    return Math.random() < RIG_WIN_PROB ? favoredMember : otherMember;
+  };
+
+  // (2) Only one present
+  if (tomPresent && !idoPresent) {
+    // if initialWinner is Tom => keep; else rig Tom vs initialWinner
+    return initialWinner.id === tom.id ? initialWinner : rigHeadToHead(tom, initialWinner);
+  }
+
+  if (!tomPresent && idoPresent) {
+    // if initialWinner is Ido => keep; else rig Ido vs initialWinner
+    return initialWinner.id === ido.id ? initialWinner : rigHeadToHead(ido, initialWinner);
+  }
+
+  // (3) Both present
+  // If initial is Tom => keep
+  if (initialWinner.id === tom.id) return initialWinner;
+
+  // If initial is Ido => "same rig we did for Tom so far"
+  // In practice that means Ido vs (someone else). But since initialWinner is Ido here, keep it.
+  if (initialWinner.id === ido.id) return initialWinner;
+
+  // Otherwise: weighted choice among {Tom, Ido, initial}
+  return weightedPick([
+    { key: "ido", weight: BOTH_PRESENT_WEIGHTS.ido, value: ido },
+    { key: "tom", weight: BOTH_PRESENT_WEIGHTS.tom, value: tom },
+    { key: "rnd", weight: BOTH_PRESENT_WEIGHTS.rnd, value: initialWinner },
+  ]);
 }
 
 async function getRoleByName(guild, roleName) {
@@ -194,23 +277,6 @@ function pickRandomHumanFrom(voiceChannel) {
   const humans = voiceChannel.members.filter((m) => !m.user.bot);
   if (humans.size === 0) return null;
   return humans.random();
-}
-
-/**
- * Tom rig:
- * If Tom is present, and the randomly selected winner isn't Tom,
- * choose between {Tom, winner} with Tom probability TOM_PROB.
- */
-function applyTomRigIfNeeded(randomWinner, voiceChannel) {
-  if (!TOM_ID) return randomWinner;
-
-  const tomMember = voiceChannel.members.get(TOM_ID);
-  const tomPresent = !!tomMember && !tomMember.user.bot;
-
-  if (!tomPresent) return randomWinner;
-  if (randomWinner.id === TOM_ID) return randomWinner;
-
-  return Math.random() < TOM_PROB ? tomMember : randomWinner;
 }
 
 async function setSingleHolder(guild, role, newHolder) {
@@ -390,13 +456,15 @@ client.on("voiceStateUpdate", (oldState, newState) => {
         let winner = pickRandomHumanFrom(oldChannel);
         if (!winner) return;
 
-        winner = applyTomRigIfNeeded(winner, oldChannel);
+        winner = applyTomIdoRig(winner, oldChannel);
 
         await setSingleHolder(guild, role, winner);
         incScore(winner.id);
 
         if (announceChannel) {
-          const chosenLine = pickRandom(CHOSEN_MESSAGES);
+          const isIdo = IDO_ID && winner.id === IDO_ID;
+          const pool = isIdo ? IDO_CHOSEN_MESSAGES : CHOSEN_MESSAGES;
+          const chosenLine = pickRandom(pool);
           await announceChannel.send(chosenLine(winner.displayName)).catch(() => {});
         }
       }
@@ -412,13 +480,15 @@ client.on("voiceStateUpdate", (oldState, newState) => {
       let winner = pickRandomHumanFrom(newChannel);
       if (!winner) return;
 
-      winner = applyTomRigIfNeeded(winner, newChannel);
+      winner = applyTomIdoRig(winner, newChannel);
 
       await setSingleHolder(guild, role, winner);
       incScore(winner.id);
 
       if (announceChannel) {
-        const chosenLine = pickRandom(CHOSEN_MESSAGES);
+        const isIdo = IDO_ID && winner.id === IDO_ID;
+        const pool = isIdo ? IDO_CHOSEN_MESSAGES : CHOSEN_MESSAGES;
+        const chosenLine = pickRandom(pool);
         await announceChannel.send(chosenLine(winner.displayName)).catch(() => {});
       }
       return;
