@@ -32,7 +32,7 @@ if (!APP_ID) throw new Error("Missing DISCORD_APP_ID env var.");
 if (!OWNER_ID) throw new Error("Missing OWNER_ID env var.");
 
 const ROLE_NAME = "Gay";
-const ANNOUNCE_CHANNEL_NAME = "general";
+const ANNOUNCE_CHANNEL_NAME = "gay-announcements";
 
 // Tom/Ido head-to-head prob (same rig as Tom had)
 const RIG_WIN_PROB = 0.2;
