@@ -25,7 +25,7 @@ const ANNOUNCE_CHANNEL_NAME = "general";
 
 // Tom rigging
 const TOM_ID = process.env.TOM_ID || ""; // recommended: set in Render env vars
-const TOM_WIN_PROB = 0.59375; // 59.375% Tom vs 40.625% W
+const TOM_WIN_PROB = 0.55; // 55% Tom vs 45% W
 
 // Timezone for daily leaderboard
 const TZ = "Asia/Jerusalem";
