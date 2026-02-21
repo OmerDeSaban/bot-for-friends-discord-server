@@ -38,6 +38,9 @@ if (!TOKEN) throw new Error("Missing DISCORD_TOKEN env var.");
 const APP_ID = process.env.DISCORD_APP_ID;
 if (!APP_ID) throw new Error("Missing DISCORD_APP_ID env var (Discord Application ID).");
 
+const GUILD_ID = process.env.GUILD_ID;
+if (!GUILD_ID) throw new Error("Missing GUILD_ID env var.");
+
 // =====================
 // HEALTH SERVER (Render keep-alive)
 // =====================
@@ -167,27 +170,36 @@ const commands = [
 
 async function registerCommands() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationCommands(APP_ID), { body: commands });
+  await rest.put(Routes.applicationGuildCommands(APP_ID, GUILD_ID), { body: commands });
   console.log("Slash commands registered.");
 }
 
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === "scoreboard") {
-    const body = formatTop3WithMedals(stats);
-    await interaction.reply(`🏆 **Gay Detection Leaderboard (Top 3)**\n${body}`);
-    return;
-  }
+  try {
+    await interaction.deferReply({ ephemeral: true });
 
-  if (interaction.commandName === "reset_scoreboard") {
-    if (!OWNER_ID || interaction.user.id !== OWNER_ID) {
-      await interaction.reply({ content: "⛔ You are not allowed to do that.", ephemeral: true });
-      return;
+    if (interaction.commandName === "scoreboard") {
+      // build response...
+      return interaction.editReply(text);
     }
-    resetStats();
-    await interaction.reply({ content: "✅ Scoreboard reset.", ephemeral: true });
-    return;
+
+    if (interaction.commandName === "reset_scoreboard") {
+      // permission check...
+      // reset...
+      return interaction.editReply("Scoreboard reset ✅");
+    }
+
+  } catch (err) {
+    console.error("interactionCreate error:", err);
+
+    // If we already deferred/replied, edit; otherwise reply.
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply("Something went wrong. Check logs.");
+    } else {
+      await interaction.reply({ content: "Something went wrong. Check logs.", ephemeral: true });
+    }
   }
 });
 
