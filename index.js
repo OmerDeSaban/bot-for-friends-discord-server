@@ -47,6 +47,15 @@ const client = new Client({
   ],
 });
 
+const CHOSEN_MESSAGES = [
+  (name) => `🚨 ALERT 🚨 **${name}** has been detected as Gay! 🌈`,
+  (name) => `HA!!!!!!! **${name}** Gayyyyyyyyyyyyy 🌈`,
+  (name) => `**${name}**, Why. Ar. Yu. Gay?! 🌈`,
+  (name) => `**${name}**, Can I call you MISTAH? 🌈`,
+  (name) => `**${name}**, You are Gay activist. You are Gay. 🌈`,
+  (name) => `The Gaydar is buzzing… it's pointing at **${name}**! 🌈`
+];
+
 const LEAVE_MESSAGES = [
   "Ohhhh, Gay guy left... Very Gay of them... Let me check who's Gay now....",
   "Ha! Gay person leaves! Must be really afraid of being called Gay... Let's see who the new Gay is:",
@@ -55,7 +64,9 @@ const LEAVE_MESSAGES = [
   "What? The Gay guy left? Was that Tom again? Gay-ass nigga.... Anyway, gotta go detect some Gay guy now:",
   "Gay guy left, huh? Let's see if someone here is more Gay than Tom...",
   "Mirror mirror on the wall, who's the new Gayest of you all?",
-  "Ido hu homo, and Tom motzetz bulbulim, but who here wants some zragim?"
+  "Ido hu homo, and Tom motzetz bulbulim, but who here wants some zragim?",
+  "What?!?! No homo?!?! Can't be! Gotta go detecting again...",
+  "Huh? No Gay?! Wait a sec, Imma go find one..,"
 ];
 
 const fs = require("fs");
@@ -313,7 +324,8 @@ client.on("voiceStateUpdate", (oldState, newState) => {
           if (winner.id !== oldId) {
             const announceChannel2 = announceChannel ?? (await getAnnouncementChannel(guild));
             if (announceChannel2) {
-              await announceChannel2.send(`🚨 ALERT 🚨 **${winner.displayName}** has been detected as Gay! 🌈`);
+              const line = pickRandom(CHOSEN_MESSAGES);
+              await announceChannel.send(line(winner.displayName));
             }
           }
         }
@@ -342,9 +354,8 @@ client.on("voiceStateUpdate", (oldState, newState) => {
       if (winner.id !== oldId) {
         const announceChannel = await getAnnouncementChannel(guild);
         if (announceChannel) {
-          await announceChannel.send(
-            `🚨 ALERT 🚨 **${winner.displayName}** has been detected as Gay! 🌈`
-          );
+          const line = pickRandom(CHOSEN_MESSAGES);
+          await announceChannel.send(line(winner.displayName));
         }
       }
       return;
