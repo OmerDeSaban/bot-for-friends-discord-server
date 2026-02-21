@@ -1,4 +1,6 @@
-require("dotenv").config();
+if (process.env.NODE_ENV !== "production") {
+  require("dotenv").config();
+}
 
 const express = require("express");
 const app = express();
@@ -47,19 +49,37 @@ const LEAVE_MESSAGES = [
   "Ohhhh, Gay guy left... Very Gay of them... Let me check who's Gay now....",
   "Ha! Gay person leaves! Must be really afraid of being called Gay... Let's see who the new Gay is:",
   "Goddamnit! Why'd they leave?! Now I have to detect Gays again...",
-  "What? The Gay guy left? Not again... Anyway, gotta go detect the next Gay:"
+  "What? The Gay guy left? Not again... Anyway, gotta go detect the next Gay:",
+  "What? The Gay guy left? Was that Tom again? Gay-ass nigga.... Anyway, gotta go detect some Gay guy now:",
+  "Gay guy left, huh? Let's see if someone here is more Gay than Tom...",
+  "Mirror mirror on the wall, who's the new Gayest of you all?",
+  "Ido hu homo, and Tom motzetz bulbulim, but who here wants some zragim?"
 ];
+
+async function getRoleByName(guild, roleName) {
+  const role = guild.roles.cache.find(r => r.name === roleName);
+  if (!role) throw new Error(`Role "${roleName}" not found`);
+  return role;
+}
+
+async function setSingleHolder(guild, role, newHolder) {
+  // Remove from previous holder only (fast + avoids rate limits)
+  const oldId = currentHolderByGuild.get(guild.id);
+  if (oldId && oldId !== newHolder.id) {
+    const oldMember = await guild.members.fetch(oldId).catch(() => null);
+    if (oldMember) await removeRoleIfHas(oldMember, role);
+  }
+
+  // Add to new holder
+  if (!newHolder.roles.cache.has(role.id)) {
+    await newHolder.roles.add(role, "Auto: random pick");
+  }
+
+  currentHolderByGuild.set(guild.id, newHolder.id);
+}
 
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
-}
-
-async function removeRoleFromEveryone(guild, role) {
-  await guild.members.fetch();
-  const membersWithRole = guild.members.cache.filter(m => m.roles.cache.has(role.id));
-  for (const m of membersWithRole.values()) {
-    await m.roles.remove(role, "Auto: clear role from everyone");
-  }
 }
 
 function withGuildLock(guildId, fn) {
@@ -69,17 +89,6 @@ function withGuildLock(guildId, fn) {
     if (guildLocks.get(guildId) === next) guildLocks.delete(guildId);
   }));
   return next;
-}
-
-async function removeRoleFromEveryoneExcept(guild, role, keepMemberId) {
-  await guild.members.fetch(); // ensure cache is populated
-  const membersWithRole = guild.members.cache.filter(m => m.roles.cache.has(role.id));
-
-  for (const m of membersWithRole.values()) {
-    if (m.id !== keepMemberId) {
-      await m.roles.remove(role, "Auto: ensure single holder");
-    }
-  }
 }
 
 async function getAnnouncementChannel(guild) {
@@ -101,175 +110,109 @@ async function getAnnouncementChannel(guild) {
   return channel;
 }
 
-function isInAnyVoice(member) {
-  return !!member.voice?.channelId;
-}
-
-async function getGayRole(guild) {
-  const role = guild.roles.cache.find((r) => r.name === ROLE_NAME);
-  if (!role) throw new Error(`Role "${ROLE_NAME}" not found`);
-  return role;
-}
-
 async function removeRoleIfHas(member, role) {
-  if (member.roles.cache.has(role.id)) {
-    await member.roles.remove(role, "Auto: role holder changed/left voice");
+  if (member?.roles?.cache?.has(role.id)) {
+    await member.roles.remove(role, "Auto: role moved/cleared");
   }
 }
-
-/*
-async function setCurrentHolder(guild, newHolderMember, role) {
-  // Remove from old holder (if we know them)
-  const oldHolderId = currentHolderByGuild.get(guild.id);
-  if (oldHolderId && oldHolderId !== newHolderMember.id) {
-    const oldMember = await guild.members.fetch(oldHolderId).catch(() => null);
-    if (oldMember) {
-      await removeRoleIfHas(oldMember, role);
-    }
-  }
-
-  // Give to new holder
-  await newHolderMember.roles.add(role, "Auto: random pick on voice join");
-  currentHolderByGuild.set(guild.id, newHolderMember.id);
-}
-*/
-
-async function chooseRandomFromVoiceChannel(voiceChannel) {
-  // Humans only, currently in this voice channel
-  const eligible = voiceChannel.members.filter((m) => !m.user.bot);
-  if (eligible.size === 0) return null;
-  return eligible.random();
-}
-
-/*
-async function syncHolderIfLeftVoice(guild, role) {
-  const holderId = currentHolderByGuild.get(guild.id);
-  if (!holderId) return;
-
-  const holder = await guild.members.fetch(holderId).catch(() => null);
-  if (!holder) {
-    currentHolderByGuild.delete(guild.id);
-    return;
-  }
-
-  // If they are no longer in ANY voice channel, remove the role
-  if (!isInAnyVoice(holder)) {
-    await removeRoleIfHas(holder, role);
-    currentHolderByGuild.delete(guild.id);
-  }
-}
-*/
 
 client.once("clientReady", async () => {
-  console.log(`Logged in as ${client.user.tag}`);
-  console.log("Listening for voice joins/leaves...");
-
-  // Optional: on startup, clear any incorrect state (good after restarts)
   for (const guild of client.guilds.cache.values()) {
-    try {
-      await guild.members.fetch();
-      const role = await getGayRole(guild);
+    await guild.members.fetch().catch(() => {});
+    const role = await getRoleByName(guild, ROLE_NAME).catch(() => null);
+    if (!role) continue;
 
-      // If someone currently has the role, track them as holder (pick first)
-      const withRole = guild.members.cache.filter(m => m.roles.cache.has(role.id));
+    // If multiple people somehow have it, keep at most one who is in voice
+    const holders = guild.members.cache.filter(m => m.roles.cache.has(role.id));
+    const inVoice = holders.filter(m => !!m.voice?.channelId);
+    const keep = inVoice.first() ?? holders.first();
 
-      const inVoice = withRole.filter(m => isInAnyVoice(m));
-      if (inVoice.size >= 1) {
-      // Keep exactly one (pick first) and remove from others
-      const keep = inVoice.first();
-      currentHolderByGuild.set(guild.id, keep.id);
-      for (const m of inVoice.values()) {
-          if (m.id !== keep.id) await removeRoleIfHas(m, role);
-      }
-      } else {
-      // Nobody with role is in voice -> remove from everyone who has it
-      for (const m of withRole.values()) {
-          await removeRoleIfHas(m, role);
-      }
+    if (!keep) {
       currentHolderByGuild.delete(guild.id);
-      }
-    } catch (e) {
-      console.warn(`Startup sync skipped for guild ${guild.id}:`, e?.message ?? e);
+      continue;
+    }
+
+    currentHolderByGuild.set(guild.id, keep.id);
+
+    for (const m of holders.values()) {
+      if (m.id !== keep.id) await removeRoleIfHas(m, role);
     }
   }
 });
 
 client.on("voiceStateUpdate", (oldState, newState) => {
-  const guild = newState.guild || oldState.guild;
+  const guild = newState.guild ?? oldState.guild;
   if (!guild) return;
 
-  const member = newState.member || oldState.member;
-  if (!member || member.user?.bot) return;
+  const actor = newState.member ?? oldState.member;
+  if (!actor || actor.user?.bot) return;
 
   withGuildLock(guild.id, async () => {
-    const role = await getGayRole(guild);
+    const role = await getRoleByName(guild, ROLE_NAME);
 
-    const oldChannel = oldState.channel; // channel they were in
-    const newChannel = newState.channel; // channel they are in now
+    const oldChannel = oldState.channel; // where they were
+    const newChannel = newState.channel; // where they are now
 
     const holderId = currentHolderByGuild.get(guild.id);
-    const isHolder = holderId === member.id;
+    const actorIsHolder = holderId === actor.id;
 
-    // Helpers
-    const rerollInChannel = async (voiceChannel, reason) => {
-      if (!voiceChannel) return;
-
-      const winner = await chooseRandomFromVoiceChannel(voiceChannel);
-      if (!winner) return;
-
-      // Make absolutely sure only one person keeps the role
-      await removeRoleFromEveryoneExcept(guild, role, winner.id);
-
-      if (!winner.roles.cache.has(role.id)) {
-        await winner.roles.add(role, reason);
-      }
-      currentHolderByGuild.set(guild.id, winner.id);
-
-      const announceChannel = await getAnnouncementChannel(guild);
-      if (announceChannel) {
-        await announceChannel.send(`🚨 ALERT 🚨 **${winner.displayName}** has been detected as Gay! 🌈`);
-      }
+    const pickRandomHumanFrom = (voiceChannel) => {
+      const humans = voiceChannel.members.filter(m => !m.user.bot);
+      if (humans.size === 0) return null;
+      return humans.random();
     };
 
-    /*
-    const removeHolderRole = async () => {
-      await removeRoleIfHas(member, role);
-      currentHolderByGuild.delete(guild.id);
-    };
-    */
-
-    // CASE A: Holder LEFT a channel (disconnect OR moved away)
+    // A) Holder left (disconnect OR moved away)
     const leftOldChannel = !!oldChannel && oldChannel.id !== (newChannel?.id ?? null);
-    if (isHolder && leftOldChannel) {
-    // remove instantly (from the leaver)
-    await removeRoleIfHas(member, role);
+    if (actorIsHolder && leftOldChannel) {
+      // Remove role instantly from the leaver
+      await removeRoleIfHas(actor, role);
+      currentHolderByGuild.delete(guild.id);
 
-    // safety: clear role from *everyone* (in case state was ever corrupted)
-    await removeRoleFromEveryone(guild, role);
-    currentHolderByGuild.delete(guild.id);
-
-    const announceChannel = await getAnnouncementChannel(guild);
-
-    // If the old channel still has humans, announce + reroll
-    const humansLeft = oldChannel.members.filter(m => !m.user.bot);
-    if (humansLeft.size > 0) {
+      // If old channel still has humans, announce + reroll in that same channel
+      const humansLeft = oldChannel.members.filter(m => !m.user.bot);
+      if (humansLeft.size > 0) {
+        const announceChannel = await getAnnouncementChannel(guild);
         if (announceChannel) {
-        await announceChannel.send(pickRandom(LEAVE_MESSAGES));
+          await announceChannel.send(pickRandom(LEAVE_MESSAGES));
         }
-        await rerollInChannel(oldChannel, "Auto: holder left, reroll in remaining channel");
-    }
 
-    return;
-    }
-
-    // CASE B: Someone ENTERED a channel (connect OR moved into a new one)
-    const enteredNewChannel = !!newChannel && newChannel.id !== (oldChannel?.id ?? null);
-    if (enteredNewChannel) {
-      await rerollInChannel(newChannel, "Auto: someone entered voice channel");
+        const winner = pickRandomHumanFrom(oldChannel);
+        if (winner) {
+          const oldId = currentHolderByGuild.get(guild.id);
+          await setSingleHolder(guild, role, winner);
+          if (winner.id !== oldId) {
+            const announceChannel2 = announceChannel ?? (await getAnnouncementChannel(guild));
+            if (announceChannel2) {
+              await announceChannel2.send(`🚨 ALERT 🚨 **${winner.displayName}** has been detected as Gay! 🌈`);
+            }
+          }
+        }
+      }
       return;
     }
 
-    // Otherwise: mute/deafen/streaming state changes etc. -> ignore
+    // B) Someone entered a channel (connect OR moved into a different one)
+    const enteredNewChannel = !!newChannel && newChannel.id !== (oldChannel?.id ?? null);
+    if (enteredNewChannel) {
+      const winner = pickRandomHumanFrom(newChannel);
+      if (!winner) return;
+
+      const oldId = currentHolderByGuild.get(guild.id);
+      await setSingleHolder(guild, role, winner);
+
+      if (winner.id !== oldId) {
+        const announceChannel = await getAnnouncementChannel(guild);
+        if (announceChannel) {
+          await announceChannel.send(
+            `🚨 ALERT 🚨 **${winner.displayName}** has been detected as Gay! 🌈`
+          );
+        }
+      }
+      return;
+    }
+
+    // Otherwise ignore mute/deafen/stream changes
   });
 });
 
