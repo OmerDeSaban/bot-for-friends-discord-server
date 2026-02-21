@@ -1,64 +1,88 @@
-if (process.env.NODE_ENV !== "production") {
-  require("dotenv").config();
-}
+/**
+ * index.js — Discord voice role bot + rigging + scoreboard + daily leaderboard
+ */
 
+require("dotenv").config();
+
+const fs = require("fs");
+const path = require("path");
 const express = require("express");
-const app = express();
-
-const PORT = process.env.PORT || 3000;
-
-app.get("/", (req, res) => {
-  res.send("Bot is alive.");
-});
-
-app.get("/healthz", (req, res) => {
-  res.send("OK");
-});
-
-app.listen(PORT, () => {
-  console.log(`Health server running on port ${PORT}`);
-});
+const { DateTime } = require("luxon");
 
 const {
   Client,
   GatewayIntentBits,
-  ChannelType,
-  PermissionsBitField,
+  REST,
+  Routes,
+  SlashCommandBuilder,
 } = require("discord.js");
 
-const TOKEN = process.env.DISCORD_TOKEN;
-if (!TOKEN) throw new Error("Missing DISCORD_TOKEN");
+// =====================
+// CONFIG
+// =====================
 const ROLE_NAME = "Gay";
 const ANNOUNCE_CHANNEL_NAME = "general";
-const TOM_WIN_PROB = 0.59375; // 59.375% Tom, 40.625% W
-const TOM_ID = "217976928475283458"
 
-// In-memory “current holder” per guild
-// guildId -> userId
-const currentHolderByGuild = new Map();
-// Prevent concurrent handling per guild
-const guildLocks = new Map(); // guildId -> Promise
+// Tom rigging
+const TOM_ID = process.env.TOM_ID || ""; // recommended: set in Render env vars
+const TOM_WIN_PROB = 0.59375; // 59.375% Tom vs 40.625% W
 
+// Timezone for daily leaderboard
+const TZ = "Asia/Jerusalem";
+
+// =====================
+// ENV CHECKS
+// =====================
+const TOKEN = process.env.DISCORD_TOKEN;
+if (!TOKEN) throw new Error("Missing DISCORD_TOKEN env var.");
+
+const APP_ID = process.env.DISCORD_APP_ID;
+if (!APP_ID) throw new Error("Missing DISCORD_APP_ID env var (Discord Application ID).");
+
+// =====================
+// HEALTH SERVER (Render keep-alive)
+// =====================
+const app = express();
+
+app.get("/", (_req, res) => res.send("Bot is alive."));
+app.get("/healthz", (_req, res) => res.send("OK"));
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`Health server running on port ${PORT}`));
+
+// =====================
+// DISCORD CLIENT
+// =====================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMembers, // recommended for role ops + fetching members
   ],
 });
 
+// =====================
+// MESSAGES (easy to extend)
+// =====================
+function pickRandom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// When someone is chosen
 const CHOSEN_MESSAGES = [
   (name) => `🚨 ALERT 🚨 **${name}** has been detected as Gay! 🌈`,
   (name) => `HA!!!!!!! **${name}** Gayyyyyyyyyyyyy 🌈`,
   (name) => `**${name}**, Why. Ar. Yu. Gay?! 🌈`,
   (name) => `**${name}**, Can I call you MISTAH? 🌈`,
   (name) => `**${name}**, You are Gay activist. You are Gay. 🌈`,
-  (name) => `The Gaydar is buzzing… it's pointing at **${name}**! 🌈`
+  (name) => `📡 The Gaydar is buzzing… it’s pointing at **${name}**!`,
+  (name) => `🧪 After careful scientific analysis… **${name}** is Gay.`,
 ];
 
+// When the current Gay leaves (and we need to pick again)
 const LEAVE_MESSAGES = [
-  "Ohhhh, Gay guy left... Very Gay of them... Let me check who's Gay now....",
-  "Ha! Gay person leaves! Must be really afraid of being called Gay... Let's see who the new Gay is:",
+  "Ohhhh, the Gay guy left... Very Gay of them... Let me check who's Gay now....",
+  "Ha! The Gay person leaves! Must be really afraid of being called Gay... Let's see who the new Gay is:",
   "Goddamnit! Why'd they leave?! Now I have to detect Gays again...",
   "What? The Gay guy left? Not again... Anyway, gotta go detect the next Gay:",
   "What? The Gay guy left? Was that Tom again? Gay-ass nigga.... Anyway, gotta go detect some Gay guy now:",
@@ -66,23 +90,63 @@ const LEAVE_MESSAGES = [
   "Mirror mirror on the wall, who's the new Gayest of you all?",
   "Ido hu homo, and Tom motzetz bulbulim, but who here wants some zragim?",
   "What?!?! No homo?!?! Can't be! Gotta go detecting again...",
-  "Huh? No Gay?! Wait a sec, Imma go find one..,"
+  "Huh? No Gay?! Wait a sec, Imma go find one..,",
 ];
 
-const fs = require("fs");
-const path = require("path");
-const { DateTime } = require("luxon");
-
+// =====================
+// SIMPLE PERSISTENT STATS (JSON)
+// =====================
 const STATS_PATH = path.join(__dirname, "stats.json");
-const TZ = "Asia/Jerusalem";
 
-const { SlashCommandBuilder, REST, Routes } = require("discord.js");
-
-const APP_ID = process.env.DISCORD_APP_ID;
-if (!APP_ID) {
-  throw new Error("Missing DISCORD_APP_ID env var (Application ID).");
+function loadStats() {
+  try {
+    return JSON.parse(fs.readFileSync(STATS_PATH, "utf8"));
+  } catch {
+    return { counts: {}, names: {} };
+  }
 }
 
+function saveStats(stats) {
+  fs.writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2), "utf8");
+}
+
+const stats = loadStats();
+
+function incrementChosen(member) {
+  const id = member.id;
+  stats.counts[id] = (stats.counts[id] ?? 0) + 1;
+  stats.names[id] = member.displayName;
+  saveStats(stats);
+}
+
+function formatTop3(statsObj) {
+  const entries = Object.entries(statsObj.counts)
+    .map(([id, count]) => ({ id, count }))
+    .sort((a, b) => b.count - a.count);
+
+  if (entries.length === 0) return "No detections yet.";
+
+  // Group ties by same count
+  const groups = [];
+  for (const e of entries) {
+    const last = groups[groups.length - 1];
+    if (!last || last.count !== e.count) groups.push({ count: e.count, ids: [e.id] });
+    else last.ids.push(e.id);
+  }
+
+  const top3 = groups.slice(0, 3);
+
+  return top3
+    .map((g, idx) => {
+      const mentions = g.ids.map((id) => `<@${id}>`).join(", ");
+      return `**#${idx + 1}** — ${mentions} (**${g.count}**)`;
+    })
+    .join("\n");
+}
+
+// =====================
+// COMMANDS (/scoreboard)
+// =====================
 const commands = [
   new SlashCommandBuilder()
     .setName("scoreboard")
@@ -96,136 +160,50 @@ async function registerCommands() {
   console.log("Slash commands registered.");
 }
 
-function loadStats() {
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === "scoreboard") {
+    const body = formatTop3(stats);
+    await interaction.reply(`🏆 **Gay Detection Leaderboard (Top 3)**\n${body}`);
+  }
+});
+
+// =====================
+// GUILD LOCK (prevents double picks on rapid joins)
+// =====================
+const guildLocks = new Map();
+
+async function withGuildLock(guildId, fn) {
+  const prev = guildLocks.get(guildId) || Promise.resolve();
+  let release;
+  const next = new Promise((res) => (release = res));
+  guildLocks.set(guildId, prev.then(() => next));
+
   try {
-    return JSON.parse(fs.readFileSync(STATS_PATH, "utf8"));
-  } catch {
-    return { counts: {}, names: {} }; // counts[userId]=number, names[userId]=last displayName
+    await prev;
+    return await fn();
+  } finally {
+    release();
+    // cleanup if nothing pending
+    if (guildLocks.get(guildId) === next) guildLocks.delete(guildId);
   }
 }
 
-function saveStats(stats) {
-  fs.writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2), "utf8");
-}
-
-const stats = loadStats();
-
-function incrementChosen(member) {
-  const id = member.id;
-  stats.counts[id] = (stats.counts[id] ?? 0) + 1;
-  stats.names[id] = member.displayName; // store latest display name
-  saveStats(stats);
-}
-
-function formatTop3(statsObj) {
-  const entries = Object.entries(statsObj.counts)
-    .map(([id, count]) => ({ id, count }))
-    .sort((a, b) => b.count - a.count);
-
-  if (entries.length === 0) return "No detections yet.";
-
-  // Group by count (ties share a slot)
-  const groups = [];
-  for (const e of entries) {
-    const last = groups[groups.length - 1];
-    if (!last || last.count !== e.count) groups.push({ count: e.count, ids: [e.id] });
-    else last.ids.push(e.id);
-  }
-
-  const top3 = groups.slice(0, 3);
-
-  const lines = top3.map((g, idx) => {
-    const names = g.ids
-      .map((id) => `<@${id}>`) // mention users
-      .join(", ");
-    return `**#${idx + 1}** — ${names} (**${g.count}**)`;
-  });
-
-  return lines.join("\n");
-}
-
-function msUntilNextMidnight() {
-  const now = DateTime.now().setZone(TZ);
-  const next = now.plus({ days: 1 }).startOf("day"); // next midnight
-  return Math.max(1000, next.toMillis() - now.toMillis());
-}
-
-async function postDailyTop3(guild) {
-  const announceChannel = await getAnnouncementChannel(guild);
-  if (!announceChannel) return;
-
-  const body = formatTop3(stats);
-  await announceChannel.send(`🏆 **Daily Gay Detection Leaderboard (Top 3)**\n${body}`);
-}
-
-function scheduleDailyLeaderboard(guild) {
-  const firstDelay = msUntilNextMidnight();
-  setTimeout(() => {
-    postDailyTop3(guild).catch(console.error);
-
-    // After first run, run every 24h
-    setInterval(() => {
-      postDailyTop3(guild).catch(console.error);
-    }, 24 * 60 * 60 * 1000);
-  }, firstDelay);
-}
-
-function getTom(voiceChannel) {
-  return voiceChannel.members.get(TOM_ID) ?? null;
-}
-
+// =====================
+// ROLE/CHANNEL HELPERS
+// =====================
 async function getRoleByName(guild, roleName) {
-  const role = guild.roles.cache.find(r => r.name === roleName);
-  if (!role) throw new Error(`Role "${roleName}" not found`);
+  // Ensure role cache is populated
+  const role = guild.roles.cache.find((r) => r.name === roleName);
+  if (!role) throw new Error(`Role "${roleName}" not found in guild ${guild.name}`);
   return role;
 }
 
-async function setSingleHolder(guild, role, newHolder) {
-  // Remove from previous holder only (fast + avoids rate limits)
-  const oldId = currentHolderByGuild.get(guild.id);
-  if (oldId && oldId !== newHolder.id) {
-    const oldMember = await guild.members.fetch(oldId).catch(() => null);
-    if (oldMember) await removeRoleIfHas(oldMember, role);
-  }
-
-  // Add to new holder
-  if (!newHolder.roles.cache.has(role.id)) {
-    await newHolder.roles.add(role, "Auto: random pick");
-  }
-
-  currentHolderByGuild.set(guild.id, newHolder.id);
-}
-
-function pickRandom(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function withGuildLock(guildId, fn) {
-  const prev = guildLocks.get(guildId) ?? Promise.resolve();
-  const next = prev.then(fn).catch((e) => console.error("Locked task error:", e));
-  guildLocks.set(guildId, next.finally(() => {
-    if (guildLocks.get(guildId) === next) guildLocks.delete(guildId);
-  }));
-  return next;
-}
-
 async function getAnnouncementChannel(guild) {
-  const channel =
-    guild.channels.cache.find(
-      (c) => c.type === ChannelType.GuildText && c.name === ANNOUNCE_CHANNEL_NAME
-    ) ?? guild.channels.cache.find((c) => c.type === ChannelType.GuildText);
-
-  if (!channel) return null;
-
-  const me = guild.members.me ?? (await guild.members.fetchMe());
-  const perms = channel.permissionsFor(me);
-  if (
-    !perms?.has(PermissionsBitField.Flags.ViewChannel) ||
-    !perms?.has(PermissionsBitField.Flags.SendMessages)
-  ) {
-    return null;
-  }
-  return channel;
+  return guild.channels.cache.find(
+    (c) => c.isTextBased?.() && c.name === ANNOUNCE_CHANNEL_NAME
+  ) || null;
 }
 
 async function removeRoleIfHas(member, role) {
@@ -234,43 +212,82 @@ async function removeRoleIfHas(member, role) {
   }
 }
 
-client.once("clientReady", async () => {
-  for (const guild of client.guilds.cache.values()) {
-    scheduleDailyLeaderboard(guild);
+// single holder tracking (per guild)
+const currentHolderByGuild = new Map();
+
+async function setSingleHolder(guild, role, newHolder) {
+  const oldId = currentHolderByGuild.get(guild.id);
+  if (oldId && oldId !== newHolder.id) {
+    const oldMember = await guild.members.fetch(oldId).catch(() => null);
+    if (oldMember) await removeRoleIfHas(oldMember, role);
   }
-  await registerCommands();
 
-  for (const guild of client.guilds.cache.values()) {
-    await guild.members.fetch().catch(() => {});
-    const role = await getRoleByName(guild, ROLE_NAME).catch(() => null);
-    if (!role) continue;
-
-    // If multiple people somehow have it, keep at most one who is in voice
-    const holders = guild.members.cache.filter(m => m.roles.cache.has(role.id));
-    const inVoice = holders.filter(m => !!m.voice?.channelId);
-    const keep = inVoice.first() ?? holders.first();
-
-    if (!keep) {
-      currentHolderByGuild.delete(guild.id);
-      continue;
-    }
-
-    currentHolderByGuild.set(guild.id, keep.id);
-
-    for (const m of holders.values()) {
-      if (m.id !== keep.id) await removeRoleIfHas(m, role);
-    }
+  if (!newHolder.roles.cache.has(role.id)) {
+    await newHolder.roles.add(role, "Auto: random pick");
   }
-});
 
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== "scoreboard") return;
+  currentHolderByGuild.set(guild.id, newHolder.id);
+}
+
+// =====================
+// TOM RIGGING (head-to-head Tom vs W)
+// =====================
+function getTom(voiceChannel) {
+  if (!TOM_ID) return null;
+  return voiceChannel.members.get(TOM_ID) ?? null;
+}
+
+function pickRandomHumanFrom(voiceChannel) {
+  const humans = voiceChannel.members.filter((m) => !m.user.bot);
+  if (humans.size === 0) return null;
+  return humans.random();
+}
+
+function applyTomRig(voiceChannel, initiallyPicked) {
+  // Rig only if Tom is present, >=2 humans, and initial pick isn't Tom.
+  const tom = getTom(voiceChannel);
+  if (!tom) return initiallyPicked;
+
+  const humans = voiceChannel.members.filter((m) => !m.user.bot);
+  if (humans.size < 2) return initiallyPicked;
+
+  if (initiallyPicked.id === tom.id) return initiallyPicked;
+
+  return Math.random() < TOM_WIN_PROB ? tom : initiallyPicked;
+}
+
+// =====================
+// DAILY MIDNIGHT LEADERBOARD
+// =====================
+function msUntilNextMidnight() {
+  const now = DateTime.now().setZone(TZ);
+  const next = now.plus({ days: 1 }).startOf("day");
+  return Math.max(1000, next.toMillis() - now.toMillis());
+}
+
+async function postDailyTop3(guild) {
+  const channel = await getAnnouncementChannel(guild);
+  if (!channel) return;
 
   const body = formatTop3(stats);
-  await interaction.reply(`🏆 **Gay Detection Leaderboard (Top 3)**\n${body}`);
-});
+  await channel.send(`🏆 **Daily Gay Detection Leaderboard (Top 3)**\n${body}`);
+}
 
+function scheduleDailyLeaderboard(guild) {
+  const firstDelay = msUntilNextMidnight();
+
+  setTimeout(() => {
+    postDailyTop3(guild).catch(console.error);
+
+    setInterval(() => {
+      postDailyTop3(guild).catch(console.error);
+    }, 24 * 60 * 60 * 1000);
+  }, firstDelay);
+}
+
+// =====================
+// MAIN VOICE LOGIC
+// =====================
 client.on("voiceStateUpdate", (oldState, newState) => {
   const guild = newState.guild ?? oldState.guild;
   if (!guild) return;
@@ -281,76 +298,57 @@ client.on("voiceStateUpdate", (oldState, newState) => {
   withGuildLock(guild.id, async () => {
     const role = await getRoleByName(guild, ROLE_NAME);
 
-    const oldChannel = oldState.channel; // where they were
-    const newChannel = newState.channel; // where they are now
+    const oldChannel = oldState.channel;
+    const newChannel = newState.channel;
 
     const holderId = currentHolderByGuild.get(guild.id);
     const actorIsHolder = holderId === actor.id;
 
-    const pickRandomHumanFrom = (voiceChannel) => {
-      const humans = voiceChannel.members.filter(m => !m.user.bot);
-      if (humans.size === 0) return null;
-      return humans.random();
-    };
-
-    // A) Holder left (disconnect OR moved away)
+    // A) Holder left a channel (disconnect OR moved away)
     const leftOldChannel = !!oldChannel && oldChannel.id !== (newChannel?.id ?? null);
     if (actorIsHolder && leftOldChannel) {
-      // Remove role instantly from the leaver
+      // remove role instantly from leaver
       await removeRoleIfHas(actor, role);
       currentHolderByGuild.delete(guild.id);
 
-      // If old channel still has humans, announce + reroll in that same channel
-      const humansLeft = oldChannel.members.filter(m => !m.user.bot);
+      // if old channel still has humans -> message + reroll there
+      const humansLeft = oldChannel.members.filter((m) => !m.user.bot);
       if (humansLeft.size > 0) {
         const announceChannel = await getAnnouncementChannel(guild);
         if (announceChannel) {
           await announceChannel.send(pickRandom(LEAVE_MESSAGES));
         }
 
-        const winner = pickRandomHumanFrom(oldChannel);
-        if (winner) {
-          const tom = getTom(newChannel);
-          const humans = newChannel.members.filter(m => !m.user.bot);
+        let winner = pickRandomHumanFrom(oldChannel);
+        if (!winner) return;
 
-          if (tom && humans.size >= 2 && winner.id !== tom.id) {
-            winner = (Math.random() < TOM_WIN_PROB) ? tom : winner; // 59.375% Tom, else W
-          }
+        winner = applyTomRig(oldChannel, winner);
 
-          incrementChosen(winner);
+        await setSingleHolder(guild, role, winner);
+        incrementChosen(winner);
 
-          const oldId = currentHolderByGuild.get(guild.id);
-          await setSingleHolder(guild, role, winner);
-          if (winner.id !== oldId) {
-            const announceChannel2 = announceChannel ?? (await getAnnouncementChannel(guild));
-            if (announceChannel2) {
-              const line = pickRandom(CHOSEN_MESSAGES);
-              await announceChannel.send(line(winner.displayName));
-            }
-          }
+        if (announceChannel) {
+          const line = pickRandom(CHOSEN_MESSAGES);
+          await announceChannel.send(line(winner.displayName));
         }
       }
+
       return;
     }
 
     // B) Someone entered a channel (connect OR moved into a different one)
     const enteredNewChannel = !!newChannel && newChannel.id !== (oldChannel?.id ?? null);
     if (enteredNewChannel) {
-      const winner = pickRandomHumanFrom(newChannel);
+      let winner = pickRandomHumanFrom(newChannel);
       if (!winner) return;
 
-      const tom = getTom(newChannel);
-      const humans = newChannel.members.filter(m => !m.user.bot);
-
-      if (tom && humans.size >= 2 && winner.id !== tom.id) {
-        winner = (Math.random() < TOM_WIN_PROB) ? tom : winner; // 59.375% Tom, else W
-      }
-
-      incrementChosen(winner);
+      winner = applyTomRig(newChannel, winner);
 
       const oldId = currentHolderByGuild.get(guild.id);
       await setSingleHolder(guild, role, winner);
+      incrementChosen(winner);
 
+      // avoid spam if the same person "wins" again
       if (winner.id !== oldId) {
         const announceChannel = await getAnnouncementChannel(guild);
         if (announceChannel) {
@@ -358,19 +356,34 @@ client.on("voiceStateUpdate", (oldState, newState) => {
           await announceChannel.send(line(winner.displayName));
         }
       }
+
       return;
     }
 
-    // Otherwise ignore mute/deafen/stream changes
-  });
+    // Ignore mute/deafen/video/etc changes
+  }).catch(console.error);
 });
 
+// =====================
+// STARTUP
+// =====================
+client.once("ready", async () => {
+  console.log(`Logged in as ${client.user.tag}`);
+
+  // Register slash commands (global). May take a few minutes to appear sometimes.
+  await registerCommands();
+
+  // Schedule daily leaderboard per guild
+  for (const guild of client.guilds.cache.values()) {
+    scheduleDailyLeaderboard(guild);
+  }
+
+  console.log("Listening for voice joins/leaves...");
+});
+
+// extra safety logging
+process.on("unhandledRejection", (err) => console.error("Unhandled Rejection:", err));
+process.on("uncaughtException", (err) => console.error("Uncaught Exception:", err));
+
+// Start the bot
 client.login(TOKEN);
-
-process.on("unhandledRejection", (err) => {
-  console.error("Unhandled Rejection:", err);
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught Exception:", err);
-});
