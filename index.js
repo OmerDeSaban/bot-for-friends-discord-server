@@ -30,6 +30,8 @@ const TOKEN = process.env.DISCORD_TOKEN;
 if (!TOKEN) throw new Error("Missing DISCORD_TOKEN");
 const ROLE_NAME = "Gay";
 const ANNOUNCE_CHANNEL_NAME = "general";
+const TOM_WIN_PROB = 0.59375; // 59.375% Tom, 40.625% W
+const TOM_ID = "217976928475283458"
 
 // In-memory “current holder” per guild
 // guildId -> userId
@@ -55,6 +57,111 @@ const LEAVE_MESSAGES = [
   "Mirror mirror on the wall, who's the new Gayest of you all?",
   "Ido hu homo, and Tom motzetz bulbulim, but who here wants some zragim?"
 ];
+
+const fs = require("fs");
+const path = require("path");
+const { DateTime } = require("luxon");
+
+const STATS_PATH = path.join(__dirname, "stats.json");
+const TZ = "Asia/Jerusalem";
+
+const { SlashCommandBuilder, REST, Routes } = require("discord.js");
+
+const APP_ID = process.env.DISCORD_APP_ID;
+if (!APP_ID) {
+  throw new Error("Missing DISCORD_APP_ID env var (Application ID).");
+}
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName("scoreboard")
+    .setDescription("Show the top 3 detection leaderboard (ties share slots).")
+    .toJSON(),
+];
+
+async function registerCommands() {
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
+  await rest.put(Routes.applicationCommands(APP_ID), { body: commands });
+  console.log("Slash commands registered.");
+}
+
+function loadStats() {
+  try {
+    return JSON.parse(fs.readFileSync(STATS_PATH, "utf8"));
+  } catch {
+    return { counts: {}, names: {} }; // counts[userId]=number, names[userId]=last displayName
+  }
+}
+
+function saveStats(stats) {
+  fs.writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2), "utf8");
+}
+
+const stats = loadStats();
+
+function incrementChosen(member) {
+  const id = member.id;
+  stats.counts[id] = (stats.counts[id] ?? 0) + 1;
+  stats.names[id] = member.displayName; // store latest display name
+  saveStats(stats);
+}
+
+function formatTop3(statsObj) {
+  const entries = Object.entries(statsObj.counts)
+    .map(([id, count]) => ({ id, count }))
+    .sort((a, b) => b.count - a.count);
+
+  if (entries.length === 0) return "No detections yet.";
+
+  // Group by count (ties share a slot)
+  const groups = [];
+  for (const e of entries) {
+    const last = groups[groups.length - 1];
+    if (!last || last.count !== e.count) groups.push({ count: e.count, ids: [e.id] });
+    else last.ids.push(e.id);
+  }
+
+  const top3 = groups.slice(0, 3);
+
+  const lines = top3.map((g, idx) => {
+    const names = g.ids
+      .map((id) => `<@${id}>`) // mention users
+      .join(", ");
+    return `**#${idx + 1}** — ${names} (**${g.count}**)`;
+  });
+
+  return lines.join("\n");
+}
+
+function msUntilNextMidnight() {
+  const now = DateTime.now().setZone(TZ);
+  const next = now.plus({ days: 1 }).startOf("day"); // next midnight
+  return Math.max(1000, next.toMillis() - now.toMillis());
+}
+
+async function postDailyTop3(guild) {
+  const announceChannel = await getAnnouncementChannel(guild);
+  if (!announceChannel) return;
+
+  const body = formatTop3(stats);
+  await announceChannel.send(`🏆 **Daily Gay Detection Leaderboard (Top 3)**\n${body}`);
+}
+
+function scheduleDailyLeaderboard(guild) {
+  const firstDelay = msUntilNextMidnight();
+  setTimeout(() => {
+    postDailyTop3(guild).catch(console.error);
+
+    // After first run, run every 24h
+    setInterval(() => {
+      postDailyTop3(guild).catch(console.error);
+    }, 24 * 60 * 60 * 1000);
+  }, firstDelay);
+}
+
+function getTom(voiceChannel) {
+  return voiceChannel.members.get(TOM_ID) ?? null;
+}
 
 async function getRoleByName(guild, roleName) {
   const role = guild.roles.cache.find(r => r.name === roleName);
@@ -118,6 +225,11 @@ async function removeRoleIfHas(member, role) {
 
 client.once("clientReady", async () => {
   for (const guild of client.guilds.cache.values()) {
+    scheduleDailyLeaderboard(guild);
+  }
+  await registerCommands();
+
+  for (const guild of client.guilds.cache.values()) {
     await guild.members.fetch().catch(() => {});
     const role = await getRoleByName(guild, ROLE_NAME).catch(() => null);
     if (!role) continue;
@@ -138,6 +250,14 @@ client.once("clientReady", async () => {
       if (m.id !== keep.id) await removeRoleIfHas(m, role);
     }
   }
+});
+
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== "scoreboard") return;
+
+  const body = formatTop3(stats);
+  await interaction.reply(`🏆 **Gay Detection Leaderboard (Top 3)**\n${body}`);
 });
 
 client.on("voiceStateUpdate", (oldState, newState) => {
@@ -179,6 +299,15 @@ client.on("voiceStateUpdate", (oldState, newState) => {
 
         const winner = pickRandomHumanFrom(oldChannel);
         if (winner) {
+          const tom = getTom(newChannel);
+          const humans = newChannel.members.filter(m => !m.user.bot);
+
+          if (tom && humans.size >= 2 && winner.id !== tom.id) {
+            winner = (Math.random() < TOM_WIN_PROB) ? tom : winner; // 59.375% Tom, else W
+          }
+
+          incrementChosen(winner);
+
           const oldId = currentHolderByGuild.get(guild.id);
           await setSingleHolder(guild, role, winner);
           if (winner.id !== oldId) {
@@ -197,6 +326,15 @@ client.on("voiceStateUpdate", (oldState, newState) => {
     if (enteredNewChannel) {
       const winner = pickRandomHumanFrom(newChannel);
       if (!winner) return;
+
+      const tom = getTom(newChannel);
+      const humans = newChannel.members.filter(m => !m.user.bot);
+
+      if (tom && humans.size >= 2 && winner.id !== tom.id) {
+        winner = (Math.random() < TOM_WIN_PROB) ? tom : winner; // 59.375% Tom, else W
+      }
+
+      incrementChosen(winner);
 
       const oldId = currentHolderByGuild.get(guild.id);
       await setSingleHolder(guild, role, winner);
@@ -217,3 +355,11 @@ client.on("voiceStateUpdate", (oldState, newState) => {
 });
 
 client.login(TOKEN);
+
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled Rejection:", err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
