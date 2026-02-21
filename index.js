@@ -365,7 +365,7 @@ async function buildScoreboardEmbed() {
     const mentions = g.userIds.map((id) => `<@${id}>`).join(", ");
 
     embed.addFields({
-      name: `${medal} #${rank} — (${g.count})`,
+      name: `${medal} #${rank} — For being chosen ${g.count} times:`,
       value: mentions,
       inline: false,
     });
