@@ -1,7 +1,3 @@
-/**
- * index.js — Discord voice role bot + rigging + scoreboard + daily leaderboard
- */
-
 require("dotenv").config();
 
 const fs = require("fs");
@@ -22,13 +18,16 @@ const {
 // =====================
 const ROLE_NAME = "Gay";
 const ANNOUNCE_CHANNEL_NAME = "general";
-
-// Tom rigging
-const TOM_ID = process.env.TOM_ID || ""; // recommended: set in Render env vars
-const TOM_WIN_PROB = 0.55; // 55% Tom vs 45% W
-
-// Timezone for daily leaderboard
 const TZ = "Asia/Jerusalem";
+
+// Rigging:
+// If TOM is in the channel and someone else is randomly chosen,
+// do a head-to-head between TOM and that person.
+const TOM_ID = process.env.TOM_ID || "";
+const TOM_WIN_PROB = 0.15; // 15% Tom, 85% the originally chosen person
+
+// Owner-only admin commands
+const OWNER_ID = process.env.OWNER_ID || "";
 
 // =====================
 // ENV CHECKS
@@ -43,7 +42,6 @@ if (!APP_ID) throw new Error("Missing DISCORD_APP_ID env var (Discord Applicatio
 // HEALTH SERVER (Render keep-alive)
 // =====================
 const app = express();
-
 app.get("/", (_req, res) => res.send("Bot is alive."));
 app.get("/healthz", (_req, res) => res.send("OK"));
 
@@ -57,12 +55,12 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers, // recommended for role ops + fetching members
+    GatewayIntentBits.GuildMembers,
   ],
 });
 
 // =====================
-// MESSAGES (easy to extend)
+// MESSAGES
 // =====================
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -94,7 +92,7 @@ const LEAVE_MESSAGES = [
 ];
 
 // =====================
-// SIMPLE PERSISTENT STATS (JSON)
+// STATS (stats.json)
 // =====================
 const STATS_PATH = path.join(__dirname, "stats.json");
 
@@ -106,11 +104,11 @@ function loadStats() {
   }
 }
 
-function saveStats(stats) {
-  fs.writeFileSync(STATS_PATH, JSON.stringify(stats, null, 2), "utf8");
+function saveStats(statsObj) {
+  fs.writeFileSync(STATS_PATH, JSON.stringify(statsObj, null, 2), "utf8");
 }
 
-const stats = loadStats();
+let stats = loadStats();
 
 function incrementChosen(member) {
   const id = member.id;
@@ -119,7 +117,12 @@ function incrementChosen(member) {
   saveStats(stats);
 }
 
-function formatTop3(statsObj) {
+function resetStats() {
+  stats = { counts: {}, names: {} };
+  saveStats(stats);
+}
+
+function formatTop3WithMedals(statsObj) {
   const entries = Object.entries(statsObj.counts)
     .map(([id, count]) => ({ id, count }))
     .sort((a, b) => b.count - a.count);
@@ -135,22 +138,30 @@ function formatTop3(statsObj) {
   }
 
   const top3 = groups.slice(0, 3);
+  const medals = ["🥇", "🥈", "🥉"];
 
   return top3
     .map((g, idx) => {
+      const medal = medals[idx] ?? "🏅";
+      const slotNumber = idx + 1;
       const mentions = g.ids.map((id) => `<@${id}>`).join(", ");
-      return `**#${idx + 1}** — ${mentions} (**${g.count}**)`;
+      return `${medal} **#${slotNumber}** — ${mentions} (**${g.count}**)`;
     })
     .join("\n");
 }
 
 // =====================
-// COMMANDS (/scoreboard)
+// SLASH COMMANDS
 // =====================
 const commands = [
   new SlashCommandBuilder()
     .setName("scoreboard")
     .setDescription("Show the top 3 detection leaderboard (ties share slots).")
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("reset_scoreboard")
+    .setDescription("Owner-only: reset the detection leaderboard.")
     .toJSON(),
 ];
 
@@ -164,13 +175,24 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === "scoreboard") {
-    const body = formatTop3(stats);
+    const body = formatTop3WithMedals(stats);
     await interaction.reply(`🏆 **Gay Detection Leaderboard (Top 3)**\n${body}`);
+    return;
+  }
+
+  if (interaction.commandName === "reset_scoreboard") {
+    if (!OWNER_ID || interaction.user.id !== OWNER_ID) {
+      await interaction.reply({ content: "⛔ You are not allowed to do that.", ephemeral: true });
+      return;
+    }
+    resetStats();
+    await interaction.reply({ content: "✅ Scoreboard reset.", ephemeral: true });
+    return;
   }
 });
 
 // =====================
-// GUILD LOCK (prevents double picks on rapid joins)
+// GUILD LOCK (avoid double rerolls)
 // =====================
 const guildLocks = new Map();
 
@@ -185,25 +207,24 @@ async function withGuildLock(guildId, fn) {
     return await fn();
   } finally {
     release();
-    // cleanup if nothing pending
     if (guildLocks.get(guildId) === next) guildLocks.delete(guildId);
   }
 }
 
 // =====================
-// ROLE/CHANNEL HELPERS
+// HELPERS (roles/channels)
 // =====================
 async function getRoleByName(guild, roleName) {
-  // Ensure role cache is populated
   const role = guild.roles.cache.find((r) => r.name === roleName);
   if (!role) throw new Error(`Role "${roleName}" not found in guild ${guild.name}`);
   return role;
 }
 
 async function getAnnouncementChannel(guild) {
-  return guild.channels.cache.find(
-    (c) => c.isTextBased?.() && c.name === ANNOUNCE_CHANNEL_NAME
-  ) || null;
+  return (
+    guild.channels.cache.find((c) => c.isTextBased?.() && c.name === ANNOUNCE_CHANNEL_NAME) ||
+    null
+  );
 }
 
 async function removeRoleIfHas(member, role) {
@@ -212,16 +233,19 @@ async function removeRoleIfHas(member, role) {
   }
 }
 
-// single holder tracking (per guild)
+// One holder per guild
 const currentHolderByGuild = new Map();
 
 async function setSingleHolder(guild, role, newHolder) {
   const oldId = currentHolderByGuild.get(guild.id);
+
+  // remove from old holder if different
   if (oldId && oldId !== newHolder.id) {
     const oldMember = await guild.members.fetch(oldId).catch(() => null);
     if (oldMember) await removeRoleIfHas(oldMember, role);
   }
 
+  // add to new holder
   if (!newHolder.roles.cache.has(role.id)) {
     await newHolder.roles.add(role, "Auto: random pick");
   }
@@ -230,21 +254,22 @@ async function setSingleHolder(guild, role, newHolder) {
 }
 
 // =====================
-// TOM RIGGING (head-to-head Tom vs W)
+// RIGGING HELPERS (kept style)
 // =====================
-function getTom(voiceChannel) {
-  if (!TOM_ID) return null;
-  return voiceChannel.members.get(TOM_ID) ?? null;
-}
-
 function pickRandomHumanFrom(voiceChannel) {
   const humans = voiceChannel.members.filter((m) => !m.user.bot);
   if (humans.size === 0) return null;
   return humans.random();
 }
 
+function getTom(voiceChannel) {
+  if (!TOM_ID) return null;
+  return voiceChannel.members.get(TOM_ID) ?? null;
+}
+
+// If Tom exists + at least 2 humans + initial pick isn't Tom,
+// then do a biased decision between Tom and initial pick.
 function applyTomRig(voiceChannel, initiallyPicked) {
-  // Rig only if Tom is present, >=2 humans, and initial pick isn't Tom.
   const tom = getTom(voiceChannel);
   if (!tom) return initiallyPicked;
 
@@ -269,7 +294,7 @@ async function postDailyTop3(guild) {
   const channel = await getAnnouncementChannel(guild);
   if (!channel) return;
 
-  const body = formatTop3(stats);
+  const body = formatTop3WithMedals(stats);
   await channel.send(`🏆 **Daily Gay Detection Leaderboard (Top 3)**\n${body}`);
 }
 
@@ -286,7 +311,7 @@ function scheduleDailyLeaderboard(guild) {
 }
 
 // =====================
-// MAIN VOICE LOGIC
+// VOICE LOGIC
 // =====================
 client.on("voiceStateUpdate", (oldState, newState) => {
   const guild = newState.guild ?? oldState.guild;
@@ -304,14 +329,14 @@ client.on("voiceStateUpdate", (oldState, newState) => {
     const holderId = currentHolderByGuild.get(guild.id);
     const actorIsHolder = holderId === actor.id;
 
-    // A) Holder left a channel (disconnect OR moved away)
+    // CASE A: Holder LEFT/moved out of a channel
     const leftOldChannel = !!oldChannel && oldChannel.id !== (newChannel?.id ?? null);
     if (actorIsHolder && leftOldChannel) {
-      // remove role instantly from leaver
+      // remove instantly
       await removeRoleIfHas(actor, role);
       currentHolderByGuild.delete(guild.id);
 
-      // if old channel still has humans -> message + reroll there
+      // if old channel still has humans -> leave msg + reroll there
       const humansLeft = oldChannel.members.filter((m) => !m.user.bot);
       if (humansLeft.size > 0) {
         const announceChannel = await getAnnouncementChannel(guild);
@@ -332,11 +357,10 @@ client.on("voiceStateUpdate", (oldState, newState) => {
           await announceChannel.send(line(winner.displayName));
         }
       }
-
       return;
     }
 
-    // B) Someone entered a channel (connect OR moved into a different one)
+    // CASE B: Someone ENTERED/moved into a new channel
     const enteredNewChannel = !!newChannel && newChannel.id !== (oldChannel?.id ?? null);
     if (enteredNewChannel) {
       let winner = pickRandomHumanFrom(newChannel);
@@ -348,7 +372,7 @@ client.on("voiceStateUpdate", (oldState, newState) => {
       await setSingleHolder(guild, role, winner);
       incrementChosen(winner);
 
-      // avoid spam if the same person "wins" again
+      // avoid spam if same person "wins" again
       if (winner.id !== oldId) {
         const announceChannel = await getAnnouncementChannel(guild);
         if (announceChannel) {
@@ -356,34 +380,37 @@ client.on("voiceStateUpdate", (oldState, newState) => {
           await announceChannel.send(line(winner.displayName));
         }
       }
-
       return;
     }
 
-    // Ignore mute/deafen/video/etc changes
+    // Otherwise ignore (mute/deafen/etc)
   }).catch(console.error);
 });
 
 // =====================
 // STARTUP
 // =====================
-client.once("ready", async () => {
+let started = false;
+async function onReady() {
+  if (started) return;
+  started = true;
+
   console.log(`Logged in as ${client.user.tag}`);
 
-  // Register slash commands (global). May take a few minutes to appear sometimes.
   await registerCommands();
 
-  // Schedule daily leaderboard per guild
-  for (const guild of client.guilds.cache.values()) {
-    scheduleDailyLeaderboard(guild);
+  for (const g of client.guilds.cache.values()) {
+    scheduleDailyLeaderboard(g);
   }
 
   console.log("Listening for voice joins/leaves...");
-});
+}
 
-// extra safety logging
+// Support both event names (v14 vs v15)
+client.once("ready", onReady);
+client.once("clientReady", onReady);
+
 process.on("unhandledRejection", (err) => console.error("Unhandled Rejection:", err));
 process.on("uncaughtException", (err) => console.error("Uncaught Exception:", err));
 
-// Start the bot
 client.login(TOKEN);
