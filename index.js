@@ -258,9 +258,12 @@ async function getAnnouncementChannel(guild) {
   const channel =
     guild.channels.cache.find(
       (c) => c.type === ChannelType.GuildText && c.name === ANNOUNCE_CHANNEL_NAME
-    ) ?? guild.channels.cache.find((c) => c.type === ChannelType.GuildText);
+    );
 
-  if (!channel) return null;
+  if (!channel) {
+    console.error('Announcement channel "${ANNOUNCE_CHANNEL_NAME}" not found.');
+    return null;
+  }
 
   const me = guild.members.me ?? (await guild.members.fetchMe());
   const perms = channel.permissionsFor(me);
@@ -268,6 +271,7 @@ async function getAnnouncementChannel(guild) {
     !perms?.has(PermissionsBitField.Flags.ViewChannel) ||
     !perms?.has(PermissionsBitField.Flags.SendMessages)
   ) {
+    console.error("Missing permissions for announcement channel.");
     return null;
   }
   return channel;
