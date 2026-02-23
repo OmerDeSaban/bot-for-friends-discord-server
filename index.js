@@ -445,7 +445,6 @@ async function onReady() {
   console.log("Listening for voice joins/leaves...");
 }
 
-client.once("ready", onReady);
 client.once("clientReady", onReady); // supports newer discord.js naming
 
 /* =========================
