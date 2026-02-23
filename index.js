@@ -98,9 +98,16 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers,
   ],
 });
+
+client.on("error", (e) => console.error("Discord client error:", e));
+client.on("shardError", (e) => console.error("Discord shardError:", e));
+client.on("shardDisconnect", (event, id) =>
+  console.error("Discord shardDisconnect:", id, event?.code, event?.reason)
+);
+client.on("shardReconnecting", (id) => console.warn("Discord shardReconnecting:", id));
+client.on("warn", (m) => console.warn("Discord warn:", m));
 
 // One holder per guild
 const currentHolderByGuild = new Map();
@@ -261,7 +268,7 @@ async function getAnnouncementChannel(guild) {
     );
 
   if (!channel) {
-    console.error('Announcement channel "${ANNOUNCE_CHANNEL_NAME}" not found.');
+    console.error(`Announcement channel "${ANNOUNCE_CHANNEL_NAME}" not found.`);
     return null;
   }
 
