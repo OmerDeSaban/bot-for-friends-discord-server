@@ -421,7 +421,7 @@ async function onReady() {
   await registerCommands();
 
   for (const guild of client.guilds.cache.values()) {
-    const role = await getRoleByName(guild, ROLE_NAME).cache(() => null);
+    const role = await getRoleByName(guild, ROLE_NAME).catch(() => null);
     if (!role) continue;
 
     const holders = [...role.members.values()];
@@ -431,10 +431,13 @@ async function onReady() {
       for (const m of holders) {
         if (m.id !== keep.id) await removeRoleIfHas(m, role);
       }
-      currentHolderByGuild.set(guild.id.keep.id);
+      currentHolderByGuild.set(guild.id, keep.id);
     }
     else if (holders.length === 1) {
-      currentHolderByGuild.set(guild.id.holders[0].id);
+      currentHolderByGuild.set(guild.id, holders[0].id);
+    }
+    else {
+      currentHolderByGuild.delete(guild.id);
     }
   }
 
