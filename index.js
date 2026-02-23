@@ -291,15 +291,12 @@ function pickRandomHumanFrom(voiceChannel) {
 }
 
 async function setSingleHolder(guild, role, newHolder) {
-  const oldId = currentHolderByGuild.get(guild.id);
-
-  // remove from old holder if different
-  if (oldId && oldId !== newHolder.id) {
-    const oldMember = await guild.members.fetch(oldId).catch(() => null);
-    if (oldMember) await removeRoleIfHas(oldMember, role);
+  for (const m of role.members.values()) {
+    if (m.id !== newHolder.id) {
+      await removeRoleIfHas(m, role);
+    }
   }
 
-  // add to new holder
   if (!newHolder.roles.cache.has(role.id)) {
     await newHolder.roles.add(role, "Auto: random pick");
   }
@@ -422,6 +419,24 @@ async function onReady() {
 
   console.log(`Logged in as ${client.user.tag}`);
   await registerCommands();
+
+  for (const guild of client.guilds.cache.values()) {
+    const role = await getRoleByName(guild, ROLE_NAME).cache(() => null);
+    if (!role) continue;
+
+    const holders = [...role.members.values()];
+    if (holders.length > 1) {
+      const keep = holders.find((m) => !!m.voice?.channelId) ?? holders[0];
+
+      for (const m of holders) {
+        if (m.id !== keep.id) await removeRoleIfHas(m, role);
+      }
+      currentHolderByGuild.set(guild.id.keep.id);
+    }
+    else if (holders.length === 1) {
+      currentHolderByGuild.set(guild.id.holders[0].id);
+    }
+  }
 
   scheduleMidnightJob();
   console.log("Listening for voice joins/leaves...");
