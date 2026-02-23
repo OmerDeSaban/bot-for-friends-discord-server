@@ -539,4 +539,7 @@ client.on("interactionCreate", async (interaction) => {
 process.on("unhandledRejection", (err) => console.error("Unhandled Rejection:", err));
 process.on("uncaughtException", (err) => console.error("Uncaught Exception:", err));
 
-client.login(TOKEN);
+console.log("Attempting Discord login...");
+client.login(TOKEN)
+  .then(() => console.log("client.login() resolved"))
+  .catch((err) => console.error("client.login() failed:", err));
