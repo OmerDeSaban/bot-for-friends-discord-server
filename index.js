@@ -291,6 +291,15 @@ function pickRandomHumanFrom(voiceChannel) {
 }
 
 async function setSingleHolder(guild, role, newHolder) {
+  const oldId = currentHolderByGuild.get(guild.id);
+
+  if (oldId && oldId !== newHolder.id) {
+    const oldMember = await guild.members.fetch(oldId).catch(() => null);
+    if (oldMember) {
+      await removeRoleIfHas(oldMember, role);
+    }
+  }
+
   for (const m of role.members.values()) {
     if (m.id !== newHolder.id) {
       await removeRoleIfHas(m, role);
