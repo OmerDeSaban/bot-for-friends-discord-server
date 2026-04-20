@@ -35,14 +35,14 @@ const ROLE_NAME = "Gay";
 const ANNOUNCE_CHANNEL_NAME = "gay-announcements";
 
 // Tom/Ido head-to-head prob (same rig as Tom had)
-const RIG_WIN_PROB = 0.25;
+const RIG_WIN_PROB = 0.10;
 
 // When both present + initial pick isn't Tom or Ido
 // Weighted 3-way: Ido 10%, Tom 15%, random 75%
 const BOTH_PRESENT_WEIGHTS = {
   ido: 0.10,
-  tom: 0.2,
-  rnd: 0.7,
+  tom: 0.20,
+  rnd: 0.70,
 };
 
 /* =========================
